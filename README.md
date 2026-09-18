@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/header.png" alt="AI PC Bench" width="100%">
+</p>
+
 # EXPC AI Benchmark Portable
 
 Portable local diagnostic package for comparative workstation analysis. Version: **0.1.2**.
