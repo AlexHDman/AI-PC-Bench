@@ -1,0 +1,11 @@
+[
+  {
+    "cpu_patterns": ["Intel(R) Core(TM) Ultra 7 265K", "Intel(R) Core(TM) Ultra 7 265KF"],
+    "npu_patterns": ["Intel AI Boost"],
+    "vendor": "Intel",
+    "architecture": "Intel NPU",
+    "rated_tops": 13,
+    "source_note": "Intel Core Ultra Desktop Processors Series 2: Intel AI Boost NPU Peak TOPS (Int8)",
+    "confidence": "exact"
+  }
+]

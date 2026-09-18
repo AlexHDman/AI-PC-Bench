@@ -1,0 +1,36 @@
+<# Safe FileStream benchmark, confined to the project's temp folder. #>
+[CmdletBinding()]
+param([int]$StorageTestSizeMb = 512, [string]$RunId = ([guid]::NewGuid().Guid))
+Set-StrictMode -Version Latest
+$ProjectRoot = Split-Path -Parent $PSScriptRoot; $MarkerPath = Join-Path $ProjectRoot '.expc-benchmark-root'; $TempPath = Join-Path $ProjectRoot 'temp'
+$warnings = [System.Collections.Generic.List[string]]::new(); $errors = [System.Collections.Generic.List[string]]::new(); $start = Get-Date; $testFile = $null; $deleted = $false; $result = $null
+function Get-Median([double[]]$Values) { $values = @($Values | Sort-Object); if ($values.Count -eq 0) { return $null }; if (($values.Count % 2) -eq 1) { return $values[[int]($values.Count / 2)] }; [math]::Round(($values[$values.Count / 2 - 1] + $values[$values.Count / 2]) / 2, 2) }
+function New-SkippedStorageResult([string]$Message) { $warnings.Add($Message); [pscustomobject]@{ test_path = $TempPath; drive = $null; drive_type = $null; disk_model = $null; bus_type = $null; test_size_mb = $null; warmup_passes = 0; measured_passes = 0; sequential_write_mbps = $null; sequential_read_mbps = $null; checksum_valid = $false; test_file_deleted = $true; duration_seconds = [math]::Round(((Get-Date) - $start).TotalSeconds, 3); completed = $false; warnings = @($warnings); errors = @($errors) } }
+try {
+    if (-not (Test-Path -LiteralPath $MarkerPath -PathType Leaf)) { return New-SkippedStorageResult 'Storage test was skipped: project root marker is missing.' }
+    if ($ProjectRoot.StartsWith('\\')) { return New-SkippedStorageResult 'Storage test was skipped: UNC/network project paths are not supported.' }
+    $tempFull = [IO.Path]::GetFullPath($TempPath); $rootFull = [IO.Path]::GetFullPath($ProjectRoot)
+    if (-not $tempFull.StartsWith($rootFull + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) { throw 'Resolved temp path is outside the project root.' }
+    New-Item -ItemType Directory -Path $tempFull -Force | Out-Null
+    $driveName = [IO.Path]::GetPathRoot($tempFull).TrimEnd([char[]]@(58, 92)); $logical = Get-CimInstance -ClassName Win32_LogicalDisk -Filter "DeviceID='$driveName`:'" -ErrorAction Stop | Select-Object -First 1
+    if ($logical.DriveType -ne 3) { return New-SkippedStorageResult "Storage test was skipped: project drive type is $($logical.DriveType), not Fixed Disk (3)." }
+    $probe = Join-Path $tempFull ("EXPC_storagecheck_" + [guid]::NewGuid().Guid + '.tmp'); try { [IO.File]::WriteAllText($probe, 'ok', [Text.UTF8Encoding]::new($false)); if ([IO.File]::ReadAllText($probe) -ne 'ok') { throw 'read/write mismatch' } } finally { if (Test-Path -LiteralPath $probe) { Remove-Item -LiteralPath $probe -Force -ErrorAction SilentlyContinue } }
+    $freeMb = [math]::Floor([double]$logical.FreeSpace / 1MB); $requested = if ($StorageTestSizeMb -gt 0) { $StorageTestSizeMb } else { 512 }; $safeMb = [math]::Min($requested, [math]::Floor($freeMb * 0.1))
+    if ($safeMb -lt 64) { return New-SkippedStorageResult "Storage test was skipped: free space ($freeMb MB) is below the 64 MB safety minimum." }
+    if ($safeMb -lt $requested) { $warnings.Add("Storage test size was reduced to $safeMb MB to preserve free space.") }
+    [int]$testMb = $safeMb; [int64]$bytes = [int64]$testMb * 1MB; $testFile = Join-Path $tempFull "EXPC_StorageTest_${RunId}.bin"; $buffer = [byte[]]::new(8MB); $pattern = [byte[]](0..255); [array]::Copy($pattern, $buffer, $pattern.Length); $filled = $pattern.Length
+    while ($filled -lt $buffer.Length) { $length = [math]::Min($filled, $buffer.Length - $filled); [Buffer]::BlockCopy($buffer, 0, $buffer, $filled, $length); $filled += $length }
+    $writes = [System.Collections.Generic.List[double]]::new(); $reads = [System.Collections.Generic.List[double]]::new(); $valid = $true
+    for ($pass = 1; $pass -le 3; $pass++) {
+        $timer = [Diagnostics.Stopwatch]::StartNew(); $writer = [Security.Cryptography.SHA256]::Create()
+        try { $stream = [IO.FileStream]::new($testFile, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::None, $buffer.Length, [IO.FileOptions]::SequentialScan); try { [int64]$written = 0; while ($written -lt $bytes) { $count = [int][math]::Min($buffer.Length, $bytes - $written); $stream.Write($buffer,0,$count); [void]$writer.TransformBlock($buffer,0,$count,$buffer,0); $written += $count }; $stream.Flush($true); [void]$writer.TransformFinalBlock([byte[]]::new(0),0,0); $expected = [Convert]::ToBase64String($writer.Hash) } finally { $stream.Dispose(); $writer.Dispose() } } finally { $timer.Stop() }
+        $write = $testMb / $timer.Elapsed.TotalSeconds; $timer.Restart(); $reader = [Security.Cryptography.SHA256]::Create()
+        try { $stream = [IO.FileStream]::new($testFile, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read, $buffer.Length, [IO.FileOptions]::SequentialScan); try { while (($count = $stream.Read($buffer,0,$buffer.Length)) -gt 0) { [void]$reader.TransformBlock($buffer,0,$count,$buffer,0) }; [void]$reader.TransformFinalBlock([byte[]]::new(0),0,0); if ([Convert]::ToBase64String($reader.Hash) -ne $expected) { $valid = $false; throw 'Storage checksum validation failed.' } } finally { $stream.Dispose(); $reader.Dispose() } } finally { $timer.Stop() }
+        if ($pass -gt 1) { $writes.Add([math]::Round($write,2)); $reads.Add([math]::Round($testMb / $timer.Elapsed.TotalSeconds,2)) }
+    }
+    $diskModel = $null; $busType = $null; try { $partition = Get-Partition -DriveLetter $driveName -ErrorAction Stop | Select-Object -First 1; $disk = Get-Disk -Number $partition.DiskNumber -ErrorAction Stop; $diskModel = $disk.FriendlyName; $busType = [string]$disk.BusType } catch { $warnings.Add('Storage disk model/bus type could not be resolved.') }
+    $end = Get-Date; $result = [pscustomobject]@{ test_path = $tempFull; drive = $driveName; drive_type = $logical.DriveType; disk_model = $diskModel; bus_type = $busType; test_size_mb = $testMb; warmup_passes = 1; measured_passes = 2; sequential_write_mbps = Get-Median ($writes.ToArray()); sequential_read_mbps = Get-Median ($reads.ToArray()); checksum_valid = $valid; test_file_deleted = $false; duration_seconds = [math]::Round(($end - $start).TotalSeconds,3); completed = $true; warnings = @($warnings); errors = @($errors) }
+}
+catch { $errors.Add($_.Exception.Message); $result = [pscustomobject]@{ test_path = $TempPath; drive = $null; drive_type = $null; disk_model = $null; bus_type = $null; test_size_mb = $null; warmup_passes = 0; measured_passes = 0; sequential_write_mbps = $null; sequential_read_mbps = $null; checksum_valid = $false; test_file_deleted = $false; duration_seconds = [math]::Round(((Get-Date)-$start).TotalSeconds,3); completed = $false; warnings = @($warnings); errors = @($errors) } }
+finally { if ($null -ne $testFile -and (Test-Path -LiteralPath $testFile)) { try { Remove-Item -LiteralPath $testFile -Force -ErrorAction Stop; $deleted = -not (Test-Path -LiteralPath $testFile) } catch { $warnings.Add("Temporary storage file could not be removed: $($_.Exception.Message)") } }; if ($null -ne $result) { $result.test_file_deleted = $deleted; $result.warnings = @($warnings) } }
+if ($null -ne $result) { $result }

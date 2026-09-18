@@ -1,0 +1,15 @@
+{
+  "benchmark_version": "0.1.2",
+  "npu_index_scale": 1000,
+  "storage_test_size_mb": 512,
+  "cpu_test_seconds": 10,
+  "memory_max_test_mb": 512,
+  "open_report_after_finish": true,
+  "keep_temp_files": false,
+  "report_language": "ru",
+  "station_label": "",
+  "show_serial_numbers": false,
+  "include_virtual_gpus_in_summary": false,
+  "preflight_idle_check_seconds": 5,
+  "preflight_cpu_warning_percent": 15
+}
