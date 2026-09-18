@@ -11,3 +11,13 @@ backups/
 # Windows
 Thumbs.db
 .DS_Store
+
+# Portable benchmark runtime
+runtime/python/*
+runtime/packages/*
+runtime/cache/*
+models/*
+
+# Keep runtime metadata
+!runtime/runtime-manifest.json
+!models/.gitkeep
